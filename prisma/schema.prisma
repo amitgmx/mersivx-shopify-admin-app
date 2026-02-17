@@ -1,0 +1,57 @@
+// Prisma schema for Shopify app with MongoDB
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+// Session model - for Shopify session storage
+model Session {
+  id                  String    @id @map("_id")
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+// Merchant credentials and builder configuration
+model MerchantConfig {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  shop        String   @unique
+  accessToken String   // OAuth access token
+  apiKey      String   // Shopify API key
+  email       String?  // User's email for notifications
+  accessKey   String?  @unique // Persistent key for builder access (generated on first configure)
+  paymentMode String   @default("freemium") // freemium, premium, etc.
+  builderData Json?    // Store 3D scene settings, banner config, etc.
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// One-time tickets for secure credential exchange
+model OneTimeTicket {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  ticket    String   @unique @default(uuid())
+  shop      String
+  used      Boolean  @default(false)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([expiresAt])
+  @@index([shop])
+}
