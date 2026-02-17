@@ -2,7 +2,7 @@
 
 client_id = "b49dac9c42dbfd45e8b75b4d2aa6d93d"
 name = "mersivx-builder-app"
-application_url = "https://example.com"
+application_url = "https://mersivx-shopify-admin-app.onrender.com"
 embedded = true
 
 [build]
@@ -26,7 +26,11 @@ api_version = "2026-04"
 scopes = "read_products,read_orders,read_discounts"
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [
+  "https://mersivx-shopify-admin-app.onrender.com/auth/callback",
+  "https://mersivx-shopify-admin-app.onrender.com/auth/shopify/callback",
+  "https://mersivx-shopify-admin-app.onrender.com/api/auth"
+]
 
 [distribution]
 type = "custom"
