@@ -1,7 +1,7 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-client_id = "b49dac9c42dbfd45e8b75b4d2aa6d93d"
-name = "mersivx-builder-app"
+client_id = "4600fc0d82964628484efb995870817d"
+name = "3D Store Creator"
 application_url = "https://mersivx-shopify-admin-app.onrender.com"
 embedded = true
 
@@ -9,7 +9,7 @@ embedded = true
 automatically_update_urls_on_dev = true
 
 [webhooks]
-api_version = "2026-04"
+api_version = "2026-01"
 
   [[webhooks.subscriptions]]
   topics = [ "app/uninstalled" ]

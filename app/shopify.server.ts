@@ -2,8 +2,13 @@ import "@shopify/shopify-app-react-router/adapters/node";
 import {
   ApiVersion,
   AppDistribution,
+  BillingInterval,
+  BillingReplacementBehavior,
   shopifyApp,
 } from "@shopify/shopify-app-react-router/server";
+
+export const BASIC_PLAN = "Basic Plan" as const;
+export const PREMIUM_PLAN = "Premium Plan" as const;
 import { MongoDBSessionStorage } from "./session-storage.server";
 
 const shopify = shopifyApp({
@@ -18,6 +23,28 @@ const shopify = shopifyApp({
   useOnlineTokens: true, // Enable online sessions to get user info
   future: {
     expiringOfflineAccessTokens: true,
+  },
+  billing: {
+    [BASIC_PLAN]: {
+      replacementBehavior: BillingReplacementBehavior.ApplyImmediately,
+      lineItems: [
+        {
+          amount: 19,
+          currencyCode: "USD",
+          interval: BillingInterval.Every30Days,
+        },
+      ],
+    },
+    [PREMIUM_PLAN]: {
+      replacementBehavior: BillingReplacementBehavior.ApplyImmediately,
+      lineItems: [
+        {
+          amount: 49,
+          currencyCode: "USD",
+          interval: BillingInterval.Every30Days,
+        },
+      ],
+    },
   },
   hooks: {
     afterAuth: async ({ session }) => {

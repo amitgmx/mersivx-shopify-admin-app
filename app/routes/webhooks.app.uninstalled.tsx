@@ -1,27 +1,25 @@
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
-import prisma from "../db.server";
+import {
+  findSessionsByShop,
+  deleteSessions,
+  deleteEComDataByShop,
+} from "../api-client.server";
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { shop, session, topic } = await authenticate.webhook(request);
+  const { shop, topic } = await authenticate.webhook(request);
 
   console.log(`Received ${topic} webhook for ${shop}`);
 
   try {
-    // Delete sessions from MongoDB (Prisma)
-    if (session) {
-      await prisma.session.deleteMany({ where: { shop } });
+    // Delete all sessions for this shop
+    const sessions = await findSessionsByShop(shop);
+    if (sessions.length > 0) {
+      await deleteSessions(sessions.map((s) => s.id));
     }
 
-    // Delete merchant config (credentials and builder data)
-    await prisma.merchantConfig.deleteMany({
-      where: { shop },
-    });
-
-    // Delete any unused tickets for this shop
-    await prisma.oneTimeTicket.deleteMany({
-      where: { shop },
-    });
+    // Delete ECommerceAppData for this shop
+    await deleteEComDataByShop(shop);
 
     console.log(`✅ Cleaned up all data for ${shop}`);
   } catch (error) {

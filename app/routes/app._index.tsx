@@ -2,79 +2,139 @@ import { useState, useEffect } from "react";
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
-import { authenticate } from "../shopify.server";
+import { authenticate, BASIC_PLAN, PREMIUM_PLAN } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
-import prisma from "../db.server";
+import {
+  findEComDataByShop,
+  findStoreByShopUrl,
+  getStorePlan,
+} from "../api-client.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, billing } = await authenticate.admin(request);
 
-  // Query existing merchant config
-  const merchantConfig = await prisma.merchantConfig.findUnique({
-    where: { shop: session.shop },
-  });
+  const userEmail = session.onlineAccessInfo?.associated_user.email || "";
 
-  // Get user email from session table
-  const sessionData = await prisma.session.findUnique({
-    where: { id: session.id },
-    select: { email: true, isOnline: true },
-  });
+  const [ecomData, storeRecord] = await Promise.all([
+    findEComDataByShop(session.shop),
+    findStoreByShopUrl(session.shop),
+  ]);
 
-  // Debug logging
-  console.log("📧 Session debug:", {
-    sessionId: session.id,
-    isOnline: sessionData?.isOnline,
-    email: sessionData?.email,
-  });
+  let currentPlan: string;
+  if (storeRecord) {
+    // Store exists in MongoDB — read its persistent plan from StoreData.metadata.
+    currentPlan = await getStorePlan(storeRecord.dbName);
+  } else {
+    // Store hasn't been created yet — check Shopify billing for a confirmed subscription.
+    currentPlan = "freemium";
+    try {
+      const { hasActivePayment, appSubscriptions } = await billing.check({
+        plans: [BASIC_PLAN, PREMIUM_PLAN],
+        isTest: process.env.NODE_ENV !== "production",
+      });
+      if (hasActivePayment && appSubscriptions.length > 0) {
+        const sub = appSubscriptions[0];
+        currentPlan =
+          sub.name === BASIC_PLAN ? "basic" :
+          sub.name === PREMIUM_PLAN ? "premium" : "freemium";
+      }
+    } catch {
+      // Billing check is best-effort; leave as freemium
+    }
+  }
 
   return {
     shop: session.shop,
-    userEmail: sessionData?.email || "",
+    userEmail,
     builderUrl: process.env.BUILDER_SYSTEM_URL || "https://www.mersivx.com",
-    merchantConfig: merchantConfig ? {
-      email: merchantConfig.email,
-      paymentMode: merchantConfig.paymentMode,
-      accessKey: merchantConfig.accessKey || null, // May be null for legacy records
-      createdAt: merchantConfig.createdAt.toISOString(),
-    } : null,
+    currentPlan,
+    isExistingStore: !!storeRecord,
+    storeDbName: storeRecord?.dbName ?? null,
+    merchantConfig: ecomData
+      ? {
+          email: ecomData.data.email ?? null,
+          accessKey: ecomData.key,
+          createdAt: ecomData.createdAt ?? new Date().toISOString(),
+        }
+      : null,
   };
 };
 
+const PLAN_LABELS: Record<string, string> = {
+  freemium: "Freemium",
+  basic: "Basic",
+  premium: "Premium",
+};
+
 export default function Index() {
-  const { shop, userEmail, builderUrl, merchantConfig } =
+  const { shop, userEmail, builderUrl, merchantConfig, currentPlan, isExistingStore, storeDbName } =
     useLoaderData<typeof loader>();
   const shopify = useAppBridge();
 
   const [email, setEmail] = useState(merchantConfig?.email || userEmail);
-  const [paymentMode, setPaymentMode] = useState(merchantConfig?.paymentMode || "freemium");
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isUpgrading, setIsUpgrading] = useState(false);
+  const [billingError, setBillingError] = useState<string | null>(null);
   const [iframeLoaded, setIframeLoaded] = useState(false);
   const [iframeUrl, setIframeUrl] = useState<string>("");
 
-  const isExistingStore = !!merchantConfig;
+  const requestUpgrade = async (plan: "basic" | "premium") => {
+    setIsUpgrading(true);
+    setBillingError(null);
+    try {
+      const token = await shopify.idToken();
+      const response = await fetch("/api/billing/request", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
+        },
+        body: JSON.stringify({ plan }),
+      });
+      const data = await response.json() as { confirmationUrl?: string; error?: string; details?: unknown };
+      if (data.confirmationUrl) {
+        window.open(data.confirmationUrl, "_top");
+      } else if (data.error) {
+        const details = data.details ? ` — ${JSON.stringify(data.details)}` : "";
+        console.error("Billing error:", data.error, data.details);
+        setBillingError(`${data.error}${details}`);
+      }
+    } catch (err) {
+      console.error("Billing request failed:", err);
+      setBillingError("Failed to start billing upgrade. Please try again.");
+    } finally {
+      setIsUpgrading(false);
+    }
+  };
 
   const runBuilder = async () => {
     setIsProcessing(true);
 
     try {
-      // Call API to create or update merchant config
+      const token = await shopify.idToken();
+      // Existing stores pass dbName so the builder loads the existing project.
+      // New stores pass email so the builder can set up the new project.
+      const body = isExistingStore
+        ? { storeDbName }
+        : { email };
+
       const response = await fetch("/api/merchant/configure", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email,
-          paymentMode,
-        }),
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
+        },
+        body: JSON.stringify(body),
       });
 
       if (!response.ok) {
-        throw new Error("Failed to configure merchant");
+        const res = await response.json().catch(() => ({}));
+        throw new Error((res as { error?: string }).error || "Failed to configure merchant");
       }
 
       const { accessKey } = await response.json();
 
-      // Open builder with accessKey
-      const builderUrlWithKey = `${builderUrl}?key=${accessKey}&mode=${paymentMode}`;
+      const builderUrlWithKey = `${builderUrl}?key=${accessKey}`;
       window.open(builderUrlWithKey, "_blank");
 
       shopify.toast.show("Opening Builder...");
@@ -86,112 +146,151 @@ export default function Index() {
     }
   };
 
-  // Load iframe - with accessKey for existing stores, without for new users (preview mode)
   useEffect(() => {
     if (merchantConfig?.accessKey) {
-      // Existing store: load with credentials
       setIframeUrl(`${builderUrl}?key=${merchantConfig.accessKey}`);
     } else {
-      // New user: load in preview/demo mode
       setIframeUrl(`${builderUrl}?mode=preview`);
     }
   }, [builderUrl, merchantConfig]);
 
+  const planCard = (
+    plan: "freemium" | "basic" | "premium",
+    price: string,
+    features: string[]
+  ) => {
+    const isCurrent = currentPlan === plan;
+    const canUpgrade = !isCurrent;
+
+    return (
+      <div style={{ flex: "1", minWidth: "200px" }}>
+      <s-box
+        padding="base"
+        borderWidth="base"
+        borderRadius="base"
+      >
+        <s-stack direction="block" gap="base">
+          <strong>{PLAN_LABELS[plan]}</strong>
+          {isCurrent && (
+            <s-badge tone="success">Current Plan</s-badge>
+          )}
+          <s-paragraph>{price}</s-paragraph>
+          <s-unordered-list>
+            {features.map((f) => (
+              <s-list-item key={f}>{f}</s-list-item>
+            ))}
+          </s-unordered-list>
+          {plan !== "freemium" && !isCurrent && (
+            <s-button
+              variant="primary"
+              onClick={() => requestUpgrade(plan)}
+              disabled={isUpgrading || !canUpgrade}
+              {...(isUpgrading ? { loading: true } : {})}
+            >
+              {`Upgrade to ${PLAN_LABELS[plan]}`}
+            </s-button>
+          )}
+        </s-stack>
+      </s-box>
+      </div>
+    );
+  };
+
   return (
     <s-page heading="Mersivx 3D Builder">
-      {/* Payment Mode Selection */}
+      {/* Plan Selection */}
       <s-section heading="Choose Your Plan">
-        <s-paragraph>
-          Select the plan that works best for your store
-        </s-paragraph>
+        <s-paragraph>Select the plan that works best for your store</s-paragraph>
 
-        <s-stack direction="inline" gap="base">
-          <s-button
-            variant={paymentMode === "freemium" ? "primary" : "secondary"}
-            onClick={() => setPaymentMode("freemium")}
-          >
-            Freemium (Free)
-          </s-button>
-          <s-button
-            variant={paymentMode === "premium" ? "primary" : "secondary"}
-            onClick={() => setPaymentMode("premium")}
-            disabled
-          >
-            Premium (Coming Soon)
-          </s-button>
-        </s-stack>
-
-        {paymentMode === "freemium" && (
-          <s-banner tone="info">
+        {billingError && (
+          <s-banner tone="critical">
             <s-paragraph>
-              <strong>Freemium Plan:</strong> Get started for free with basic 3D builder features
+              <strong>Billing error:</strong> {billingError}
             </s-paragraph>
           </s-banner>
         )}
-      </s-section>
 
-      {/* Email Configuration */}
-      <s-section heading="Contact Email">
-        <s-paragraph>
-          This email will be used for notifications and updates from the builder
-        </s-paragraph>
-
-        <div style={{ maxWidth: "400px" }}>
-          <input
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="your@email.com"
-            style={{
-              width: "100%",
-              padding: "8px 12px",
-              border: "1px solid #ccc",
-              borderRadius: "4px",
-              fontSize: "14px",
-              boxSizing: "border-box",
-            }}
-          />
+        <div style={{ display: "flex", gap: "16px", flexWrap: "wrap" }}>
+          {planCard("freemium", "Free forever", [
+            "Basic 3D builder",
+            "1 active scene",
+            "Standard support",
+          ])}
+          {planCard("basic", "$19 / month", [
+            "Everything in Freemium",
+            "5 active scenes",
+            "Priority support",
+          ])}
+          {planCard("premium", "$49 / month", [
+            "Everything in Basic",
+            "Unlimited scenes",
+            "Custom domain",
+            "Dedicated support",
+          ])}
         </div>
 
-        {!email && (
-          <s-banner tone="warning">
-            <s-paragraph>
-              Please enter your email address to continue
-            </s-paragraph>
-          </s-banner>
-        )}
       </s-section>
+
+      {/* Email Configuration — only needed when creating a new store */}
+      {!isExistingStore && (
+        <s-section heading="Contact Email">
+          <s-paragraph>
+            This email will be used for notifications and updates from the builder
+          </s-paragraph>
+
+          <div style={{ maxWidth: "400px" }}>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="your@email.com"
+              style={{
+                width: "100%",
+                padding: "8px 12px",
+                border: "1px solid #ccc",
+                borderRadius: "4px",
+                fontSize: "14px",
+                boxSizing: "border-box",
+              }}
+            />
+          </div>
+
+          {!email && (
+            <s-banner tone="warning">
+              <s-paragraph>Please enter your email address to continue</s-paragraph>
+            </s-banner>
+          )}
+        </s-section>
+      )}
 
       {/* Store Status */}
       {isExistingStore && (
         <s-section heading="Store Status">
           <s-banner tone="success">
             <s-paragraph>
-              <strong>Store Created:</strong> Your 3D store was created on{" "}
-              {new Date(merchantConfig.createdAt).toLocaleDateString()}
+              <strong>Store Active</strong> — Your 3D store is ready to edit.
             </s-paragraph>
           </s-banner>
         </s-section>
       )}
 
-      {/* Launch Builder - Two Options */}
+      {/* Launch Builder */}
       <s-section heading="Launch Builder">
         <s-paragraph>
           {isExistingStore
             ? "Choose how to access your 3D store builder:"
-            : "Create your immersive 3D shopping experience"
-          }
+            : "Create your immersive 3D shopping experience"}
         </s-paragraph>
 
         <s-stack direction="block" gap="base">
           <div>
             <s-paragraph>
-              Continue building your 3d store in a new browser tab
+              Continue building your 3D store in a new browser tab
             </s-paragraph>
             <s-button
               onClick={runBuilder}
               variant="primary"
-              disabled={!email || isProcessing}
+              disabled={(!isExistingStore && !email) || isProcessing}
               {...(isProcessing ? { loading: true } : {})}
             >
               {isExistingStore ? "Open in New Tab" : "Create 3D Store"}
@@ -200,14 +299,13 @@ export default function Index() {
         </s-stack>
       </s-section>
 
-      {/* Builder Preview (iframe) - Show for all users */}
+      {/* Builder Preview (iframe) */}
       {iframeUrl && (
         <s-section heading={isExistingStore ? "Builder Preview" : "3D Store Preview"}>
           <s-paragraph>
             {isExistingStore
               ? "Interactive builder embedded within the Shopify Admin"
-              : "Preview the 3D store builder interface below. Click 'Create 3D Store' above to start building."
-            }
+              : "Preview the 3D store builder interface below. Click 'Create 3D Store' above to start building."}
           </s-paragraph>
 
           <s-box padding="base" borderWidth="base" borderRadius="base">
@@ -228,11 +326,7 @@ export default function Index() {
               )}
               <iframe
                 src={iframeUrl}
-                style={{
-                  width: "100%",
-                  height: "100%",
-                  border: "none",
-                }}
+                style={{ width: "100%", height: "100%", border: "none" }}
                 title="Mersivx Builder Preview"
                 onLoad={() => setIframeLoaded(true)}
               />
@@ -241,13 +335,13 @@ export default function Index() {
         </s-section>
       )}
 
-      {/* Sidebar Info */}
+      {/* Sidebar */}
       <s-section slot="aside" heading="Store Info">
         <s-paragraph>
           <strong>Store:</strong> {shop}
         </s-paragraph>
         <s-paragraph>
-          <strong>Plan:</strong> {paymentMode === "freemium" ? "Freemium" : "Premium"}
+          <strong>Plan:</strong> {PLAN_LABELS[currentPlan] ?? currentPlan}
         </s-paragraph>
         {isExistingStore && (
           <s-paragraph>

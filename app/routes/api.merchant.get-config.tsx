@@ -1,11 +1,11 @@
-import type { ActionFunctionArgs} from "react-router";
-import prisma from "../db.server";
+import type { ActionFunctionArgs } from "react-router";
+import { findEComDataByKey, findStoreByShopUrl, getStorePlan } from "../api-client.server";
 
 /**
  * Get merchant config by accessKey (for builder)
  * POST /api/merchant/get-config
  * Body: { key: string }
- * Returns: { shop, accessToken, apiKey, email, paymentMode, builderData, isNew }
+ * Returns: { shop, accessToken, apiKey, email, paymentMode, plan, dbName, isNew }
  */
 export async function action({ request }: ActionFunctionArgs) {
   const clientIP = request.headers.get("x-forwarded-for") || "unknown";
@@ -17,31 +17,34 @@ export async function action({ request }: ActionFunctionArgs) {
       return Response.json({ error: "Access key required" }, { status: 400 });
     }
 
-    // Find merchant config by accessKey
-    const config = await prisma.merchantConfig.findUnique({
-      where: { accessKey: key },
-    });
+    const config = await findEComDataByKey(key);
 
     if (!config) {
       console.warn(`⚠️ Invalid access key attempt from IP: ${clientIP}`);
       return Response.json({ error: "Invalid access key" }, { status: 401 });
     }
 
-    // Log successful access
-    console.log(`✅ Builder accessed config for shop: ${config.shop} from IP: ${clientIP}`);
+    console.log(
+      `✅ Builder accessed config for shop: ${config.data.shop} from IP: ${clientIP}`
+    );
 
-    // Determine if this is a new store (no builderData yet)
-    const isNew = !config.builderData;
+    // For "edit" commands, dbName is stored directly in data — use it without an
+    // extra cross-database lookup. Fall back to findStoreByShopUrl for older records.
+    const dbName = config.data.dbName
+      ?? (await findStoreByShopUrl(config.data.shop))?.dbName
+      ?? null;
 
-    // Return configuration
+    const plan = dbName ? await getStorePlan(dbName) : "freemium";
+
     return Response.json({
-      shop: config.shop,
-      accessToken: config.accessToken,
-      apiKey: config.apiKey,
-      email: config.email,
-      paymentMode: config.paymentMode,
-      builderData: config.builderData,
-      isNew,
+      shop: config.data.shop,
+      dbName,
+      accessToken: config.data.accessToken ?? null,
+      apiKey: config.data.apiKey ?? null,
+      email: config.data.email ?? null,
+      paymentMode: config.data.paymentMode ?? "freemium", // backward compatibility
+      plan,
+      isNew: config.command === "shopify-create",
     });
   } catch (error) {
     console.error("Error fetching config:", error);
